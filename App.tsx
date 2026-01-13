@@ -33,6 +33,11 @@ const App: React.FC = () => {
 
   const startSession = async () => {
     setError(null);
+    // Always start fresh if we are starting a session
+    if (liveManagerRef.current) {
+        liveManagerRef.current.disconnect();
+    }
+    
     const manager = new LiveManager(API_KEY);
     liveManagerRef.current = manager;
 
@@ -48,8 +53,15 @@ const App: React.FC = () => {
       setError(err);
     };
 
-    await manager.connect();
-    return manager;
+    try {
+        await manager.connect();
+        return manager;
+    } catch (e) {
+        // Error is already handled in onError callback for UI, 
+        // but we need to ensure local ref is cleaned if it failed completely
+        console.error("Connection failed", e);
+        throw e;
+    }
   };
 
   const toggleConnection = async () => {
@@ -68,20 +80,28 @@ const App: React.FC = () => {
     if (isUploading) return;
     
     setIsUploading(true);
+    setError(null);
+
     try {
       let manager = liveManagerRef.current;
       
-      // If disconnected, start the session first
-      if (!manager || connectionState === ConnectionState.DISCONNECTED) {
+      const isDisconnected = !manager || 
+                             connectionState === ConnectionState.DISCONNECTED || 
+                             connectionState === ConnectionState.ERROR;
+                             
+      if (isDisconnected) {
         manager = await startSession();
       } else if (connectionState === ConnectionState.CONNECTING) {
-         if (!manager) throw new Error("Session initializing...");
+         throw new Error("Connection in progress. Please wait a moment.");
       }
       
-      if (!manager) throw new Error("Failed to initialize session");
+      if (!manager) {
+          throw new Error("Failed to initialize session");
+      }
 
       await manager.sendAudioFile(file);
     } catch (e: any) {
+      console.error("Upload process failed", e);
       setError(e.message || "Upload failed");
     } finally {
       setIsUploading(false);

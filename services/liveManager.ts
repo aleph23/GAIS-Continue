@@ -1,5 +1,5 @@
 import { GoogleGenAI, LiveServerMessage, Modality } from '@google/genai';
-import { createGeminiAudioBlob, decodePCM, pcmToAudioBuffer, encodePCM, resampleTo16k } from '../utils/audioUtils';
+import { createGeminiAudioBlob, decodePCM, pcmToAudioBuffer, encodePCM, resampleTo16k, downsampleTo16k } from '../utils/audioUtils';
 import { INPUT_SAMPLE_RATE, OUTPUT_SAMPLE_RATE } from '../types';
 
 export class LiveManager {
@@ -13,6 +13,7 @@ export class LiveManager {
   private inputSource: MediaStreamAudioSourceNode | null = null;
   private inputAnalyser: AnalyserNode | null = null;
   private outputAnalyser: AnalyserNode | null = null;
+  private isProcessingFile = false; // Flag to mute mic during upload
   
   // Callback for status updates
   public onStatusChange: (status: string) => void = () => {};
@@ -27,12 +28,11 @@ export class LiveManager {
       this.onStatusChange('CONNECTING');
       
       // Initialize Audio Contexts
-      this.inputContext = new (window.AudioContext || (window as any).webkitAudioContext)({
-        sampleRate: INPUT_SAMPLE_RATE,
-      });
-      this.outputContext = new (window.AudioContext || (window as any).webkitAudioContext)({
-        sampleRate: OUTPUT_SAMPLE_RATE,
-      });
+      // NOTE: We do NOT force sampleRate here. Forcing it can cause "Connecting AudioNodes from AudioContexts with different sample-rate" error
+      // when connecting the microphone MediaStreamSource (which is hardware locked) to the context.
+      // Instead, we accept the system rate and downsample manually in the processor.
+      this.inputContext = new (window.AudioContext || (window as any).webkitAudioContext)();
+      this.outputContext = new (window.AudioContext || (window as any).webkitAudioContext)();
 
       // Analysers for visualization
       this.inputAnalyser = this.inputContext.createAnalyser();
@@ -50,10 +50,14 @@ export class LiveManager {
       this.scriptProcessor = this.inputContext.createScriptProcessor(4096, 1, 1);
       
       this.scriptProcessor.onaudioprocess = (e) => {
-        if (!this.sessionPromise) return;
+        // Prevent mic input if session is missing, context is missing, OR if we are currently uploading a file
+        if (!this.sessionPromise || !this.inputContext || this.isProcessingFile) return;
 
         const inputData = e.inputBuffer.getChannelData(0);
-        const pcmBlob = createGeminiAudioBlob(inputData);
+        
+        // Downsample to 16kHz before sending
+        const downsampledData = downsampleTo16k(inputData, this.inputContext.sampleRate);
+        const pcmBlob = createGeminiAudioBlob(downsampledData);
         
         this.sessionPromise.then(session => {
           try {
@@ -99,10 +103,13 @@ export class LiveManager {
           },
         }
       });
-
+      
     } catch (error: any) {
+      // Cleanup if connection failed
+      this.disconnect();
       this.onError(error.message);
       this.onStatusChange('ERROR');
+      throw error; // Rethrow so caller knows it failed
     }
   }
 
@@ -112,6 +119,7 @@ export class LiveManager {
     // Handle Audio Output
     const base64Audio = message.serverContent?.modelTurn?.parts?.[0]?.inlineData?.data;
     if (base64Audio) {
+      console.log("Received audio response chunk from Gemini");
       this.nextStartTime = Math.max(this.nextStartTime, this.outputContext.currentTime);
       
       try {
@@ -142,10 +150,12 @@ export class LiveManager {
 
     // Handle interruptions
     if (message.serverContent?.interrupted) {
+      console.log("Audio interrupted");
       this.nextStartTime = 0;
-      // In a real app we might want to cancel currently playing nodes, 
-      // but simple queue management handles most overlapping nicely by simple time reset if logic allows.
-      // For strict cancellation we'd need to track active sources.
+    }
+    
+    if (message.serverContent?.turnComplete) {
+      console.log("Turn complete");
     }
   }
 
@@ -154,20 +164,26 @@ export class LiveManager {
         throw new Error("Session not active");
     }
 
+    console.log("Starting file upload:", file.name);
+    this.isProcessingFile = true; // Stop mic input
+
     const session = await this.sessionPromise;
     
     // Create a temporary AudioContext to decode the uploaded file
     const tempCtx = new (window.AudioContext || (window as any).webkitAudioContext)();
 
     try {
+        console.log("Decoding audio file...");
         const arrayBuffer = await file.arrayBuffer();
         const decodedBuffer = await tempCtx.decodeAudioData(arrayBuffer);
         
+        console.log("Resampling to 16kHz...");
         // Resample to 16kHz
         const resampledData = await resampleTo16k(decodedBuffer);
         
+        console.log(`Sending ${resampledData.length} samples in chunks...`);
+
         // Stream the audio data in chunks to simulate realtime input
-        // Using larger chunks than realtime to speed up "upload" but small enough for server buffering
         const CHUNK_SIZE = 4000; // ~0.25 seconds of audio per chunk
         
         for (let i = 0; i < resampledData.length; i += CHUNK_SIZE) {
@@ -178,25 +194,31 @@ export class LiveManager {
             await new Promise(r => setTimeout(r, 10));
         }
 
+        console.log("File audio sent. Sending prompt...");
         // Send a specific prompt to indicate the clip is finished and request continuation
         session.sendRealtimeInput({ 
             content: { parts: [{ text: "I have just played a melody. Continue it from where it left off." }] } 
         });
+        
+        console.log("Upload sequence complete.");
 
     } catch (e: any) {
         console.error("Error processing audio file:", e);
         throw new Error("Failed to process audio file: " + e.message);
     } finally {
         await tempCtx.close();
+        this.isProcessingFile = false; // Resume mic input
     }
   }
 
   public disconnect() {
+    this.isProcessingFile = false;
+    
     if (this.sessionPromise) {
         // session.close() if available, else just drop references
         this.sessionPromise.then(s => {
-            if (s.close) s.close();
-        });
+            if (s && s.close) s.close();
+        }).catch(() => {}); // Ignore errors on close
     }
     
     if (this.scriptProcessor) {
@@ -208,17 +230,19 @@ export class LiveManager {
         this.inputSource.disconnect();
     }
 
-    if (this.inputContext) {
+    if (this.inputContext && this.inputContext.state !== 'closed') {
         this.inputContext.close();
     }
     
-    if (this.outputContext) {
+    if (this.outputContext && this.outputContext.state !== 'closed') {
         this.outputContext.close();
     }
 
     this.sessionPromise = null;
     this.inputContext = null;
     this.outputContext = null;
+    this.scriptProcessor = null;
+    this.inputSource = null;
     this.nextStartTime = 0;
     this.onStatusChange('DISCONNECTED');
   }

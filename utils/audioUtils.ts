@@ -78,3 +78,20 @@ export async function resampleTo16k(audioBuffer: AudioBuffer): Promise<Float32Ar
   const resampled = await offlineCtx.startRendering();
   return resampled.getChannelData(0);
 }
+
+// Real-time downsampling using linear interpolation
+export function downsampleTo16k(input: Float32Array, inputRate: number): Float32Array {
+  if (inputRate === 16000) return input;
+  const ratio = inputRate / 16000;
+  const newLength = Math.ceil(input.length / ratio);
+  const result = new Float32Array(newLength);
+  
+  for (let i = 0; i < newLength; i++) {
+    const originalIndex = i * ratio;
+    const index1 = Math.floor(originalIndex);
+    const index2 = Math.min(input.length - 1, Math.ceil(originalIndex));
+    const weight = originalIndex - index1;
+    result[i] = input[index1] * (1 - weight) + input[index2] * weight;
+  }
+  return result;
+}
