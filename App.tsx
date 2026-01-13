@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Mic, MicOff, Music, Activity, AlertCircle } from 'lucide-react';
+import { Mic, MicOff, Music, Activity, AlertCircle, FileAudio, MessageSquare } from 'lucide-react';
 import { LiveManager } from './services/liveManager';
 import Visualizer from './components/Visualizer';
 import FileUpload from './components/FileUpload';
@@ -11,6 +11,8 @@ const App: React.FC = () => {
   const [connectionState, setConnectionState] = useState<string>(ConnectionState.DISCONNECTED);
   const [error, setError] = useState<string | null>(null);
   const [isUploading, setIsUploading] = useState(false);
+  const [isMicActive, setIsMicActive] = useState(false);
+  const [aiText, setAiText] = useState<string | null>(null);
   const liveManagerRef = useRef<LiveManager | null>(null);
 
   // Analysers for visualization
@@ -33,6 +35,7 @@ const App: React.FC = () => {
 
   const startSession = async () => {
     setError(null);
+    setAiText(null);
     // Always start fresh if we are starting a session
     if (liveManagerRef.current) {
         liveManagerRef.current.disconnect();
@@ -46,6 +49,9 @@ const App: React.FC = () => {
       if (status === 'CONNECTED') {
         setInputAnalyser(manager.getInputAnalyser());
         setOutputAnalyser(manager.getOutputAnalyser());
+        setIsMicActive(manager.isMicEnabled());
+      } else if (status === 'DISCONNECTED') {
+        setIsMicActive(false);
       }
     };
 
@@ -53,12 +59,17 @@ const App: React.FC = () => {
       setError(err);
     };
 
+    manager.onTextReceived = (text) => {
+      setAiText(text);
+      // Clear text after a few seconds if it's just a short acknowledgment, 
+      // but keep if it's an instruction
+      setTimeout(() => setAiText(null), 5000);
+    };
+
     try {
         await manager.connect();
         return manager;
     } catch (e) {
-        // Error is already handled in onError callback for UI, 
-        // but we need to ensure local ref is cleaned if it failed completely
         console.error("Connection failed", e);
         throw e;
     }
@@ -71,6 +82,8 @@ const App: React.FC = () => {
       setConnectionState(ConnectionState.DISCONNECTED);
       setInputAnalyser(null);
       setOutputAnalyser(null);
+      setIsMicActive(false);
+      setAiText(null);
     } else {
       await startSession();
     }
@@ -81,6 +94,7 @@ const App: React.FC = () => {
     
     setIsUploading(true);
     setError(null);
+    setAiText(null);
 
     try {
       let manager = liveManagerRef.current;
@@ -140,13 +154,14 @@ const App: React.FC = () => {
             {/* Input Visualizer */}
             <div className="relative bg-slate-900/50 border border-slate-800 rounded-xl overflow-hidden backdrop-blur-sm shadow-xl">
               <div className="absolute top-2 left-3 text-xs font-bold text-cyan-500 uppercase tracking-widest flex items-center gap-2">
-                <Mic size={12} /> Input
+                {isMicActive ? <Mic size={12} /> : <FileAudio size={12} />} 
+                {isMicActive ? 'Mic Input' : 'File Input'}
               </div>
               <div className="w-full h-full p-2">
                 <Visualizer 
                   analyser={inputAnalyser} 
                   color="#22d3ee" 
-                  isActive={isConnected} 
+                  isActive={isConnected && (isMicActive || isUploading)} 
                 />
               </div>
             </div>
@@ -163,6 +178,13 @@ const App: React.FC = () => {
                   isActive={isConnected} 
                 />
               </div>
+              {/* AI Text Overlay */}
+              {aiText && (
+                <div className="absolute bottom-4 left-4 right-4 bg-slate-950/80 p-3 rounded-lg border border-purple-500/30 text-sm text-purple-200 backdrop-blur flex items-start gap-2 animate-in fade-in slide-in-from-bottom-2">
+                  <MessageSquare size={16} className="mt-0.5 shrink-0" />
+                  <span>{aiText}</span>
+                </div>
+              )}
             </div>
           </div>
 
@@ -173,6 +195,7 @@ const App: React.FC = () => {
             <button
               onClick={toggleConnection}
               disabled={isConnecting}
+              title={isMicActive ? "Mute Microphone / Disconnect" : "Disconnect / Connect Mic"}
               className={`
                 relative flex items-center justify-center w-24 h-24 rounded-full transition-all duration-500
                 ${isConnected 
@@ -185,7 +208,7 @@ const App: React.FC = () => {
               {isConnecting ? (
                 <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-current"></div>
               ) : isConnected ? (
-                <MicOff size={32} />
+                isMicActive ? <MicOff size={32} /> : <FileAudio size={32} className="animate-pulse" />
               ) : (
                 <Mic size={32} />
               )}
@@ -215,17 +238,29 @@ const App: React.FC = () => {
                 <Activity size={16} /> Connecting to Gemini Live...
               </span>
             )}
-            {isConnected && !isUploading && (
-              <span className="text-green-400 flex items-center gap-2 text-sm font-medium">
-                <div className="w-2 h-2 bg-green-400 rounded-full animate-pulse"></div> 
-                Listening... (Sing or play now)
-              </span>
-            )}
+            
             {isConnected && isUploading && (
               <span className="text-yellow-400 flex items-center gap-2 text-sm font-medium animate-pulse">
                  Processing and sending audio clip...
               </span>
             )}
+
+            {isConnected && !isUploading && (
+               <span className="text-green-400 flex items-center gap-2 text-sm font-medium">
+                {isMicActive ? (
+                   <>
+                     <div className="w-2 h-2 bg-green-400 rounded-full animate-pulse"></div> 
+                     Listening... (Sing or play now)
+                   </>
+                ) : (
+                   <>
+                     <Music size={16} /> 
+                     Connected (Mic Disabled). AI will respond to files.
+                   </>
+                )}
+              </span>
+            )}
+
             {connectionState === ConnectionState.DISCONNECTED && !error && !isUploading && (
                <span className="text-slate-500 text-sm">Ready to start session</span>
             )}
@@ -246,11 +281,11 @@ const App: React.FC = () => {
           <ul className="space-y-2 text-sm text-slate-400">
             <li className="flex gap-2">
               <span className="text-cyan-500 font-bold">1.</span>
-              Start the session by clicking the microphone button.
+              Start the session by clicking the microphone button (or just upload a file to auto-start).
             </li>
             <li className="flex gap-2">
               <span className="text-cyan-500 font-bold">2.</span>
-              Sing a short melody (10-15 seconds) or play an instrument clearly near the mic.
+              Sing a short melody (10-15 seconds) or play an instrument clearly.
             </li>
             <li className="flex gap-2">
               <span className="text-cyan-500 font-bold">3.</span>
@@ -258,7 +293,7 @@ const App: React.FC = () => {
             </li>
              <li className="flex gap-2">
               <span className="text-cyan-500 font-bold">4.</span>
-              Or, upload a short audio clip (MP3/WAV) to feed it directly to the model.
+              Upload a short audio clip (MP3/WAV) to feed it directly to the model.
             </li>
           </ul>
         </div>
