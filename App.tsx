@@ -31,6 +31,27 @@ const App: React.FC = () => {
     };
   }, []);
 
+  const startSession = async () => {
+    setError(null);
+    const manager = new LiveManager(API_KEY);
+    liveManagerRef.current = manager;
+
+    manager.onStatusChange = (status) => {
+      setConnectionState(status);
+      if (status === 'CONNECTED') {
+        setInputAnalyser(manager.getInputAnalyser());
+        setOutputAnalyser(manager.getOutputAnalyser());
+      }
+    };
+
+    manager.onError = (err) => {
+      setError(err);
+    };
+
+    await manager.connect();
+    return manager;
+  };
+
   const toggleConnection = async () => {
     if (connectionState === ConnectionState.CONNECTED || connectionState === ConnectionState.CONNECTING) {
       liveManagerRef.current?.disconnect();
@@ -39,35 +60,27 @@ const App: React.FC = () => {
       setInputAnalyser(null);
       setOutputAnalyser(null);
     } else {
-      setError(null);
-      const manager = new LiveManager(API_KEY);
-      liveManagerRef.current = manager;
-
-      manager.onStatusChange = (status) => {
-        setConnectionState(status);
-        if (status === 'CONNECTED') {
-          setInputAnalyser(manager.getInputAnalyser());
-          setOutputAnalyser(manager.getOutputAnalyser());
-        }
-      };
-
-      manager.onError = (err) => {
-        setError(err);
-      };
-
-      await manager.connect();
+      await startSession();
     }
   };
 
   const handleFileUpload = async (file: File) => {
-    if (!liveManagerRef.current || connectionState !== 'CONNECTED') {
-      setError("Please start the session first!");
-      return;
-    }
+    if (isUploading) return;
     
     setIsUploading(true);
     try {
-      await liveManagerRef.current.sendAudioFile(file);
+      let manager = liveManagerRef.current;
+      
+      // If disconnected, start the session first
+      if (!manager || connectionState === ConnectionState.DISCONNECTED) {
+        manager = await startSession();
+      } else if (connectionState === ConnectionState.CONNECTING) {
+         if (!manager) throw new Error("Session initializing...");
+      }
+      
+      if (!manager) throw new Error("Failed to initialize session");
+
+      await manager.sendAudioFile(file);
     } catch (e: any) {
       setError(e.message || "Upload failed");
     } finally {
@@ -165,7 +178,7 @@ const App: React.FC = () => {
             <div className="flex flex-col items-center">
                <FileUpload 
                  onFileSelect={handleFileUpload} 
-                 disabled={!isConnected} 
+                 disabled={isUploading} 
                  isUploading={isUploading}
                />
                <span className="text-xs text-slate-500 mt-2">
@@ -193,8 +206,8 @@ const App: React.FC = () => {
                  Processing and sending audio clip...
               </span>
             )}
-            {connectionState === ConnectionState.DISCONNECTED && !error && (
-              <span className="text-slate-500 text-sm">Ready to start session</span>
+            {connectionState === ConnectionState.DISCONNECTED && !error && !isUploading && (
+               <span className="text-slate-500 text-sm">Ready to start session</span>
             )}
              {error && (
               <span className="text-red-400 flex items-center gap-2 text-sm font-medium">
@@ -225,7 +238,7 @@ const App: React.FC = () => {
             </li>
              <li className="flex gap-2">
               <span className="text-cyan-500 font-bold">4.</span>
-              Or, upload a short audio clip to feed it directly to the model.
+              Or, upload a short audio clip (MP3/WAV) to feed it directly to the model.
             </li>
           </ul>
         </div>
