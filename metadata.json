@@ -1,0 +1,7 @@
+{
+  "name": "Melody Weaver",
+  "description": "An AI musical companion that listens to your melody or harmony and improvises a continuation in real-time.",
+  "requestFramePermissions": [
+    "microphone"
+  ]
+}
